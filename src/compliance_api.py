@@ -5,6 +5,7 @@ Provides REST API for querying audit logs for regulatory compliance (SEC, FINRA)
 """
 
 import logging
+import os
 from datetime import datetime
 from flask import Flask, request, jsonify
 from typing import Dict, Optional
