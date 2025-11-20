@@ -13,6 +13,7 @@ import sys
 import time
 from datetime import datetime
 from typing import Dict, Optional
+import re
 
 import requests
 from kafka import KafkaConsumer, KafkaProducer
@@ -477,6 +478,94 @@ class KafkaLLMProcessor:
             logger.error(f"Error during shutdown: {e}")
 
 
+def validate_config(config: Dict) -> None:
+    """
+    Validate configuration on startup.
+    
+    Raises:
+        ValueError: If configuration is invalid
+    """
+    errors = []
+    
+    # Validate required fields
+    required_fields = ['kafka_brokers', 'input_topic', 'output_topic', 'llm_url', 'model_name']
+    for field in required_fields:
+        if not config.get(field):
+            errors.append(f"Required configuration '{field}' is missing or empty")
+    
+    # Validate Kafka brokers format
+    if config.get('kafka_brokers'):
+        for broker in config['kafka_brokers']:
+            if not broker or ':' not in broker:
+                errors.append(f"Invalid Kafka broker format: '{broker}'. Expected 'host:port'")
+            else:
+                parts = broker.split(':')
+                if len(parts) != 2:
+                    errors.append(f"Invalid Kafka broker format: '{broker}'. Expected 'host:port'")
+                else:
+                    try:
+                        port = int(parts[1])
+                        if port < 1 or port > 65535:
+                            errors.append(f"Invalid port in Kafka broker '{broker}'. Port must be 1-65535")
+                    except ValueError:
+                        errors.append(f"Invalid port in Kafka broker '{broker}'. Port must be a number")
+    
+    # Validate LLM URL format
+    if config.get('llm_url'):
+        if not config['llm_url'].startswith(('http://', 'https://')):
+            errors.append(f"Invalid LLM URL: '{config['llm_url']}'. Must start with http:// or https://")
+    
+    # Validate numeric ranges
+    if config.get('llm_timeout') is not None:
+        if config['llm_timeout'] < 1 or config['llm_timeout'] > 600:
+            errors.append(f"LLM timeout must be between 1 and 600 seconds, got {config['llm_timeout']}")
+    
+    if config.get('llm_max_tokens') is not None:
+        if config['llm_max_tokens'] < 1 or config['llm_max_tokens'] > 100000:
+            errors.append(f"LLM max_tokens must be between 1 and 100000, got {config['llm_max_tokens']}")
+    
+    if config.get('llm_temperature') is not None:
+        if config['llm_temperature'] < 0.0 or config['llm_temperature'] > 2.0:
+            errors.append(f"LLM temperature must be between 0.0 and 2.0, got {config['llm_temperature']}")
+    
+    # Validate drift detection parameters
+    if config.get('drift_threshold') is not None:
+        if config['drift_threshold'] < 0.0 or config['drift_threshold'] > 1.0:
+            errors.append(f"Drift threshold must be between 0.0 and 1.0, got {config['drift_threshold']}")
+    
+    if config.get('drift_baseline_window') is not None:
+        if config['drift_baseline_window'] < 10:
+            errors.append(f"Drift baseline window must be at least 10, got {config['drift_baseline_window']}")
+    
+    if config.get('drift_detection_window') is not None:
+        if config['drift_detection_window'] < 10:
+            errors.append(f"Drift detection window must be at least 10, got {config['drift_detection_window']}")
+    
+    if config.get('drift_min_samples') is not None:
+        if config['drift_min_samples'] < 1:
+            errors.append(f"Drift min_samples must be at least 1, got {config['drift_min_samples']}")
+    
+    # Validate topic names (not empty, no invalid characters)
+    for topic_field in ['input_topic', 'output_topic']:
+        if config.get(topic_field):
+            topic = config[topic_field]
+            if not re.match(r'^[a-zA-Z0-9._-]+$', topic):
+                errors.append(f"Invalid topic name '{topic}'. Use only alphanumeric, dots, underscores, and hyphens")
+    
+    # Log warnings for optional but recommended settings
+    if config.get('consumer_group') == 'llm-processor-group':
+        logger.warning("Using default consumer group. Consider setting CONSUMER_GROUP env var for production.")
+    
+    # Raise error if any validation failed
+    if errors:
+        error_msg = "Configuration validation failed:\n" + "\n".join(f"  - {err}" for err in errors)
+        raise ValueError(error_msg)
+    
+    logger.info(" Configuration validation passed")
+
+
+
+
 def load_config() -> Dict:
     """Load configuration from environment variables with defaults."""
     return {
@@ -503,6 +592,7 @@ def load_config() -> Dict:
 def main():
     """Main entry point."""
     config = load_config()
+    validate_config(config)
     processor = KafkaLLMProcessor(config)
     
     try:
