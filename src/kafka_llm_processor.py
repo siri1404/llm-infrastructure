@@ -18,6 +18,17 @@ import requests
 from kafka import KafkaConsumer, KafkaProducer
 from kafka.errors import KafkaError
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('kafka_llm_processor.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
 # Import audit logger (optional - only if available)
 try:
     from audit_logger import AuditLogger
@@ -33,17 +44,6 @@ try:
 except ImportError:
     DRIFT_DETECTION_AVAILABLE = False
     logger.warning("Drift detection not available. Install scipy for full functionality.")
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('kafka_llm_processor.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
 
 
 class LLMProcessor:
