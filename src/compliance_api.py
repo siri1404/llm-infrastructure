@@ -13,7 +13,10 @@ import logging
 import os
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
+from functools import wraps
 from typing import Dict, Optional
+import hashlib
+import hmac
 
 try:
     from audit_logger import AuditLogger
@@ -30,6 +33,127 @@ app = Flask(__name__)
 
 # Initialize audit logger
 audit_logger = AuditLogger()
+
+# Authorization configuration
+# In production, use environment variables or secure secret management
+API_KEY_HASH = os.getenv('COMPLIANCE_API_KEY_HASH', hashlib.sha256('dev-secret-key'.encode()).hexdigest())
+REQUIRE_AUTHORIZATION = os.getenv('REQUIRE_AUTHORIZATION', 'true').lower() == 'true'
+
+
+def verify_api_key(provided_key: str) -> bool:
+    """
+    Verify API key against stored hash.
+    
+    Args:
+        provided_key: The API key provided in the request
+        
+    Returns:
+        True if valid, False otherwise
+    """
+    if not provided_key:
+        return False
+    provided_hash = hashlib.sha256(provided_key.encode()).hexdigest()
+    return hmac.compare_digest(provided_hash, API_KEY_HASH)
+
+
+def verify_tenant_access(api_key: str, tenant_id: str) -> bool:
+    """
+    Verify that the API key has access to the specified tenant.
+    
+    In production, this should query a database or authorization service.
+    For now, we implement a simple check.
+    
+    Args:
+        api_key: The authenticated API key
+        tenant_id: The tenant ID being accessed
+        
+    Returns:
+        True if authorized, False otherwise
+    """
+    # TODO: Implement proper tenant-to-key mapping
+    # For now, valid API key = access to all tenants
+    return verify_api_key(api_key)
+
+
+def require_authorization(f):
+    """
+    Decorator to require API key authorization for sensitive endpoints.
+    
+    Expects Authorization header with format: "Bearer <api-key>"
+    """
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not REQUIRE_AUTHORIZATION:
+            logger.warning("Authorization is disabled! Enable REQUIRE_AUTHORIZATION in production.")
+            return f(*args, **kwargs)
+        
+        auth_header = request.headers.get('Authorization')
+        
+        if not auth_header:
+            logger.warning(f"Unauthorized access attempt to {request.path} - No authorization header")
+            return jsonify({
+                "error": "Authorization required",
+                "message": "Please provide an API key in the Authorization header (Bearer <api-key>)"
+            }), 401
+        
+        # Parse Bearer token
+        parts = auth_header.split()
+        if len(parts) != 2 or parts[0].lower() != 'bearer':
+            logger.warning(f"Unauthorized access attempt to {request.path} - Invalid authorization format")
+            return jsonify({
+                "error": "Invalid authorization format",
+                "message": "Use: Authorization: Bearer <api-key>"
+            }), 401
+        
+        api_key = parts[1]
+        
+        if not verify_api_key(api_key):
+            logger.warning(f"Unauthorized access attempt to {request.path} - Invalid API key")
+            return jsonify({
+                "error": "Invalid API key",
+                "message": "The provided API key is not valid"
+            }), 403
+        
+        # Store the API key in request context for tenant verification
+        request.api_key = api_key
+        
+        logger.info(f"Authorized access to {request.path}")
+        return f(*args, **kwargs)
+    
+    return decorated_function
+
+
+def log_deletion_request(user_id: str, tenant_id: Optional[str], requester_info: Dict):
+    """
+    Log GDPR deletion requests for audit trail.
+    
+    Args:
+        user_id: The user whose data is being deleted
+        tenant_id: Optional tenant ID
+        requester_info: Information about who requested the deletion
+    """
+    logger.info(
+        f"GDPR DELETION REQUEST: user_id={user_id}, tenant_id={tenant_id}, "
+        f"endpoint={request.path}, ip={request.remote_addr}"
+    )
+    
+    # In production, log to a separate deletion audit log
+    try:
+        # Could store in a dedicated deletion_audit table
+        deletion_metadata = {
+            'action': 'gdpr_deletion_request',
+            'user_id': user_id,
+            'tenant_id': tenant_id,
+            'requester_ip': request.remote_addr,
+            'timestamp': datetime.utcnow().isoformat(),
+            'endpoint': request.path
+        }
+        # Additional audit logging can be implemented here
+    except Exception as e:
+        logger.error(f"Failed to log deletion request: {e}")
+
+
+
 
 
 @app.route('/health', methods=['GET'])
@@ -316,6 +440,7 @@ def mifid2_compliance_query():
 
 
 @app.route('/api/compliance/prebuilt/gdpr', methods=['POST'])
+@require_authorization
 def gdpr_compliance_query():
     """
     Prebuilt GDPR compliance query.
@@ -343,6 +468,21 @@ def gdpr_compliance_query():
         
         if action == 'delete':
             # GDPR Right to Deletion
+            # Verify tenant access if tenant_id provided
+            if tenant_id and hasattr(request, "api_key"):
+                if not verify_tenant_access(request.api_key, tenant_id):
+                    logger.warning(f"Unauthorized tenant access: user_id={user_id}, tenant_id={tenant_id}")
+                    return jsonify({
+                        "error": "Unauthorized",
+                        "message": "No permission to delete data for this tenant"
+                    }), 403
+            
+            # Log the deletion request
+            log_deletion_request(user_id, tenant_id, {
+                "api_key_used": hasattr(request, "api_key"),
+                "ip_address": request.remote_addr
+            })
+            
             deleted_count = audit_logger.delete_user_data(user_id, tenant_id)
             return jsonify({
                 "compliance_standard": "GDPR",
