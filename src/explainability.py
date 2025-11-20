@@ -242,7 +242,7 @@ class LLMExplainer:
                 return np.array(results)
             
             # Generate explanation
-            explanation = self.explainer.explain_instance(
+            explanation = self.lime_explainer.explain_instance(
                 input_text,
                 predict_proba,
                 num_features=max_features,
